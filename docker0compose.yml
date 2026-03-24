@@ -1,0 +1,88 @@
+# Local AI Stack — Docker Compose
+# Starts Open-WebUI and Apache Tika together with a single command.
+#
+# Prerequisites:
+#   - Ollama installed and running natively on macOS (https://ollama.com)
+#   - Docker Desktop installed with at least 4GB RAM allocated
+#
+# Usage:
+#   docker compose up -d        # Start all services
+#   docker compose down         # Stop all services
+#   docker compose logs -f      # Watch live logs from all services
+#   docker compose logs -f tika # Watch Tika logs only
+#   docker compose logs -f open-webui # Watch Open-WebUI logs only
+#
+# After starting, open http://localhost:3000 in your browser.
+#
+# Open-WebUI configuration (Admin Panel → Settings → Documents):
+#   Tika Server URL:   http://tika:9998
+#   Embedding Backend: Ollama
+#   Embedding Model:   mxbai-embed-large
+#   Ollama URL:        http://host.docker.internal:11434
+
+services:
+
+  # ── Apache Tika ──────────────────────────────────────────────────────────
+  # Full image includes Tesseract OCR for scanned PDF support.
+  # JAVA_OPTS increases the Java heap from the default (often 256MB) to 4GB,
+  # preventing connection drops when processing large documents.
+  tika:
+    image: apache/tika:latest-full
+    container_name: tika
+    restart: unless-stopped
+    ports:
+      - "9998:9998"
+    environment:
+      JAVA_OPTS: "-Xms512m -Xmx4g"
+    networks:
+      - ai-stack
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9998/tika"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Open-WebUI ───────────────────────────────────────────────────────────
+  # Web interface for chatting with Ollama models and managing knowledge bases.
+  # Depends on Tika being healthy before starting.
+  # Data is persisted to a named volume so it survives container restarts.
+  #
+  # host.docker.internal resolves to the Mac host, allowing Open-WebUI to
+  # reach Ollama which runs natively on macOS (not inside Docker).
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      # Point Open-WebUI at Ollama running natively on the Mac host
+      OLLAMA_BASE_URL: "http://host.docker.internal:11434"
+      # Point Open-WebUI at Tika using the shared Docker network (by service name)
+      TIKA_SERVER_URL: "http://tika:9998"
+    extra_hosts:
+      # Allows containers to reach the Mac host via host.docker.internal
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      tika:
+        condition: service_healthy
+    networks:
+      - ai-stack
+
+# ── Named volume for Open-WebUI data persistence ─────────────────────────
+# Stores uploaded documents, knowledge bases, vector embeddings, and settings.
+# Data survives container restarts and updates.
+# To use a local Mac folder instead, replace with:
+#   - ~/open-webui-data:/app/backend/data
+volumes:
+  open-webui-data:
+
+# ── Shared network ───────────────────────────────────────────────────────
+# Both containers share this network, allowing Open-WebUI to reach Tika
+# by service name (http://tika:9998) rather than needing host.docker.internal.
+networks:
+  ai-stack:
+    driver: bridge
